@@ -1,147 +1,152 @@
-# MOSS-Image Colab Studio
+# MOSS-Image on a single GPU (RTX 4090) — local toolkit + measured findings
 
-在 Google Colab 的 L4 GPU 上使用 [MOSS-Image](https://github.com/OpenMOSS/MOSS-Image) 的網頁工作台。
-不用操作 ComfyUI 節點，在五個分頁裡完成文生圖、海報排版、指令修圖、局部重繪與構圖控制。
+This repository is a fork of **[Openclaw-Metis/MOSS-Image-Colab](https://github.com/Openclaw-Metis/MOSS-Image-Colab)**,
+a Google Colab studio (FastAPI + Gradio over a headless ComfyUI) for [MOSS-Image](https://github.com/OpenMOSS/MOSS-Image).
 
-[![在 Colab 開啟](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Openclaw-Metis/MOSS-Image-Colab/blob/main/notebooks/MOSS_Image_Colab.ipynb)
+The upstream studio is tied to Colab: its bootstrap hard-fails on any GPU that is not an NVIDIA L4
+(`l4_preflight`), it pins its own ComfyUI copy, and everything lives on the ephemeral disk.
+MOSS-Image has had native ComfyUI support since 0.43/0.44, so a 24 GB desktop card runs it
+roughly **10× faster than the L4** with no Colab session at all.
 
-> **開發版**：所有功能都在 Colab L4 實測過，但多圖修圖 3～4 張與輪廓控制沒有通過驗收，繁中標題也可能寫錯，
-> 所以還不算正式發布。詳見[已知限制](#已知限制)。
+So this fork keeps the reusable parts of the studio as a small, testable Python package
+(`local-4090/`) and documents what actually works, measured on an RTX 4090.
 
-## 快速開始
+The upstream Colab studio is untouched and still here: `src/`, `notebooks/`, `docs/`, `specs/`,
+`workflows/`, `configs/`. Its documentation moved to **[README-colab-studio.md](README-colab-studio.md)**
+(Traditional Chinese).
 
-需要付費 Colab 方案，且還有 compute unit 額度。
+---
 
-1. 點上方按鈕開啟 Notebook，執行階段選 **L4 GPU**（Notebook 已預設 L4 與高 RAM）。
-2. 依序執行第 1～4 格。第一次會下載約 24.5 GB 模型，需要 10 分鐘以上。
-3. 點第 4 格印出的**一次性登入連結**。連結要在 30 分鐘內點開、只能用一次；登入後同一個瀏覽器 10 小時內不用再登入。
-4. 用完先下載作品或匯出專案 ZIP，再執行最後一格「停止工具」，並在 Colab 刪除執行階段，避免繼續消耗額度。
+## What `local-4090/` contains
 
-完整步驟、各分頁用法與疑難排解見[使用說明](docs/user-guide.md)。
-
-## 功能
-
-| 分頁 | 可以做什麼 | 驗收狀態 |
+| Module | What it does | Came from |
 |---|---|---|
-| 文生圖與排版 | 精細 50 步或加速 8 步生圖；一鍵套用常用比例；在畫布上拉框指定文字、物件與人物位置 | 通過；繁中字可能寫錯 |
-| 多圖指令修圖 | 用文字指令改圖，例如「把圖 1 的外套換成圖 2 的外套」 | 1～2 張通過；3～4 張為實驗 |
-| 筆刷局部重繪 | 塗出要改的範圍再描述內容；塗抹範圍外的像素原封不動 | 通過 |
-| 視覺與深度控制 | 照來源圖的深度或色塊構圖，換角色或換風格 | 深度通過；輪廓限天空或遠景背景；視覺參考為實驗 |
-| 模型與高解析 | 下載固定清單模型、切換 SFT／Base 主模型、加入 Hugging Face LoRA、分段放大到 2048² | 通過；自加 LoRA 未做 GPU 實測 |
+| `mosskit/layout.py` | Compiles boxes → the JSON layout prompt MOSS reads as text (`abs_centralized`, `yxyx`) | Port of `src/moss_studio/domain/layout.py` |
+| `mosskit/masks.py` | Finite-support feather + compositing that keeps untouched pixels byte-identical | Port of `src/moss_studio/domain/masks.py` |
+| `mosskit/profiles.py` | Sampling profiles with the parameters already validated on GPU | `configs/profiles/*.json` + ComfyUI templates |
+| `mosskit/graph.py` | Builds complete ComfyUI API graphs (t2i, edit, inpaint) with no runtime patching | `workflows/*.json` |
+| `mosskit/client.py` | Upload, queue, poll, download | — |
+| `tests/` | 17 tests, no GPU needed | — |
 
-專案（輸入圖、遮罩、排版、各分頁設定與作品）可匯出成 ZIP，在新的 Colab 執行階段匯入後接著編輯。
+Two behaviours differ from upstream on purpose, both discovered by testing:
 
-在 L4 上的實測耗時：加速 8 步約 10～15 秒、精細 50 步約 110～150 秒、修圖約 80～95 秒、分段放大到 2048² 約 520 秒
-（1 MP 圖；其他項目見[使用說明](docs/user-guide.md#大約要多久)）。
+1. **`caption == text` for text boxes.** If a text box's `caption` differs from its `text`, the model
+   renders the caption as ghost type on the poster. The upstream schema allows the difference; in
+   practice it leaks. `compile_layout(..., force_caption_equal_text=True)` enforces the safe form and
+   puts the typographic description in `summary.caption` instead.
+2. **`text_safe` per profile.** The 8-step DMD8 profile is 3× faster but destroys typography, so it is
+   flagged and documented instead of being offered as an equal option.
 
-## 已知限制
+---
 
-- **繁中字形**：實測 10 張繁中排版海報有 3 張文字出錯（「週」寫成「周」、「鬱金香」寫成「鬱花香」、框描述的「橘棕色」被寫進標題），
-  未達 8/10 的目標。請逐字檢查成品，重要標題建議後製加字。（[批次 A](docs/evidence/stage2-batch-a/README.md)）
-- **多圖修圖 3～4 張**：模型常沒把圖 3、圖 4 的內容帶進成品，介面標為實驗。（[批次 C](docs/evidence/stage4-6-batch-c/README.md)）
-- **輪廓控制**：在棚拍或室內背景下估出的輪廓整片變白，等於沒有控制；介面預設改用深度。
-- **視覺參考**：MOSS-Image 本身沒有圖片輸入，這條路徑傾向照抄參考圖，效果不保證。
-- **原生大圖**：超過約 2.2 MP 的原生尺寸是實驗功能，建議先生成再分段放大。
-- **資料只在 Colab 暫存磁碟**：執行階段被回收或刪除後，模型、作品與專案都會消失，請記得下載或匯出。
-- **單人使用**：一次只跑一個 GPU 工作；工作台網址是公開網址，登入連結與密碼不要分享。
+## Measured on an RTX 4090 (24 GB)
 
-## 使用限制與隱私
+ComfyUI 0.44.0 (`1332fab`), Python 3.13, torch 2.14.1+cu130, int8 checkpoints.
+1 MP unless noted, models already resident.
 
-- 不得以真人照片製作換臉、私密或冒用他人身分的內容；Colab 對所有執行環境禁止 deepfakes。
-- 上傳的圖片只存在你自己的 Colab 執行階段，存檔時去除原始檔名與中繼資料；工具不會把素材上傳到其他服務。
-- Hugging Face token 為選填，只從 Colab 密鑰讀取，不寫入檔案、輸出、專案或日誌。
+| Run | Time |
+|---|---|
+| 25 steps (official template) | **10.2 s** |
+| 50 steps | **17.2 s** |
+| 1536×864 (16:9) | 12.2 s |
+| 8 steps + DMD8 LoRA | 3.4 s |
+| Image-edit LoRA, 30 steps | 26–35 s |
+| Masked inpaint, 30 steps, denoise 0.65 | ~37 s |
+| Cold model load (first run) | ~150 s |
 
-## 驗收狀態
+Peak VRAM during generation: **19.2 GB of 24.5 GB**.
 
-規格 [v1.3.0](specs/requirements.md) 的 Stage 0～10 都已完成，驗收都在 Colab L4 實跑。
+For reference, upstream measured the same model at 110–150 s for 50 steps on a Colab L4.
 
-- 必要驗收項目中，AC-08（多圖修圖）與 AC-11（輪廓控制）為有條件通過，其餘全部通過；兩項限制已由使用者接受，介面也已標示。
-- AC-19（繁中排版）是決策關卡，7/10，使用者接受限制。
-- Stage 10 依 README 在乾淨 L4 重演一次，由使用者操作並回報正常。
+## Text rendering, measured
 
-逐項結果見 [Stage 9 總表](docs/stages/stage9.md)；各批次的報告與縮圖在 [`docs/evidence/`](docs/evidence/)。
+Tested with 12 generations and a character-by-character visual review.
 
-## 運作方式
+| Case | Result |
+|---|---|
+| Short Spanish headline + subline | **10/10 correct**, including `Ñ`, accents and `·` |
+| Four-line Spanish paragraph | 1 error in one sample (`Cuatro` → `Cuatra`) |
+| 8-step DMD8 profile | **Typography unreadable — unusable for text** |
+| 16:9 title card | Correct |
 
-```mermaid
-flowchart LR
-  B["你的瀏覽器"] -->|"HTTPS"| T["Cloudflare Quick Tunnel"]
-  T --> W["工作台<br/>FastAPI + Gradio"]
-  W -->|"127.0.0.1"| C["ComfyUI 無頭引擎"]
-  C --> G["L4 GPU"]
-```
+MOSS-Image is bilingual (English/Chinese) by training; Spanish still renders well because the text
+encoder is a general 9B model, but budget a proofread on long copy.
 
-- ComfyUI 只綁在 loopback，沒有對外入口；所有生成、上傳與下載都走需要登入的同源 HTTP，進度用輪詢，不依賴 SSE。
-- 環境與模型都鎖定版本：Python 3.13.16、PyTorch 2.14.1+cu130、ComfyUI 0.44.0（`1332fab`）、Gradio 6.31.0；
-  每個模型檔都校驗 SHA256（`configs/runtime.lock.json`、`configs/models.lock.json`）。
-- 工作流是固定的 API 格式範本（`workflows/`），送出前會用引擎的 `object_info` 驗證。
+## Quickstart
 
-## 模型來源
-
-| 模型 | 大小 | 第 2 格下載 |
-|---|---|---|
-| SFT 主模型 | 10.16 GB | 是 |
-| Qwen3.5 9B int8 文字／視覺編碼器 | 9.75 GB | 是 |
-| VAE（flux2-vae_small） | 0.25 GB | 是 |
-| 加速 8 步 LoRA | 1.19 GB | 是（可取消勾選） |
-| 修圖 LoRA | 0.30 GB | 是（可取消勾選） |
-| 色彩／深度控制 LoRA | 0.31 GB | 是（可取消勾選） |
-| MoGe 3 幾何估計 | 2.50 GB | 是（可取消勾選） |
-| Base 主模型 | 10.16 GB | 否；要切換主模型時到模型頁下載 |
-
-來源都鎖定 commit，下載後校驗 SHA256：
-
-- [Comfy-Org/MOSS-Image](https://huggingface.co/Comfy-Org/MOSS-Image/tree/2929efe3cdd506c0a430bcfca70a9a8d805cc095)：主模型、編碼器、VAE、修圖與控制 LoRA，宣告 Apache-2.0
-- [lodestones/MOSS-Image-SFT-8-steps-dmd](https://huggingface.co/lodestones/MOSS-Image-SFT-8-steps-dmd/tree/f95df83b5e90ae91ea412434b3f9b7f1c8c6314f)：加速 8 步 LoRA，宣告 Apache-2.0
-- [Comfy-Org/MoGe](https://huggingface.co/Comfy-Org/MoGe/tree/1484985258ba7ef45c314144fcf0e90924ffbf44)：MoGe 3，宣告 MIT
-
-授權以提供者的模型卡為準，用途請自行確認。模型權重、使用者素材與憑證都不進版控。
-
-上游參考：[MOSS-Image 使用指南](https://github.com/OpenMOSS/MOSS-Image/blob/main/USERGUIDE.md)、
-[ComfyUI MOSS-Image 文件](https://github.com/Comfy-Org/docs/blob/main/tutorials/image/moss-image/moss-image.mdx)。
-
-## 開發
-
-```text
-src/moss_studio/   domain（驗證）、storage（保存）、services（調度）、adapters（ComfyUI、HTTP、工作流）、ui
-configs/           版本鎖、模型鎖、採樣預設（profiles）、功能狀態（capabilities.json）
-workflows/         ComfyUI API 格式範本
-notebooks/         Colab Notebook
-scripts/           假引擎開發伺服器、GPU 批次腳本、引擎 preflight
-tests/             unit、integration（CPU）與 gpu（需 L4）
-```
-
-CPU 測試與 lint（Linux／macOS）：
+### 1. Pinned ComfyUI, separate from your daily install
 
 ```bash
-python -m venv .venv
-.venv/bin/python -m pip install -r requirements-dev.lock
-.venv/bin/python -m pip install -e ".[ui]"
-.venv/bin/pytest -q
-.venv/bin/ruff check src tests scripts
+git clone https://github.com/Comfy-Org/ComfyUI.git
+cd ComfyUI && git checkout 1332fabfcc507aa7c548cd5152071ed494c207e8
+python -m venv ../venv
+../venv/Scripts/python -m pip install "torch==2.14.1+cu130" torchvision torchaudio \
+  --index-url https://download.pytorch.org/whl/cu130
+../venv/Scripts/python -m pip install -r requirements.txt
 ```
 
-Windows 改用 `.venv\Scripts\python.exe` 執行相同指令；依賴 Linux `/proc` 或符號連結權限的測試會在 Windows 跳過。
+### 2. Weights (17.2 GB total, from `Comfy-Org/MOSS-Image`)
 
-不接 GPU 檢查介面：假引擎會產生標明「非模型輸出」的佔位圖，只能看介面流程，不能當成 GPU 或畫質證據。
+| File | Size | Folder |
+|---|---|---|
+| `moss_image_sft_int8_convrot.safetensors` | 5.41 GB | `models/diffusion_models/` |
+| `qwen3.5_9b_int8_convrot.safetensors` | 9.75 GB | `models/text_encoders/` |
+| `flux2-vae_small.safetensors` | 0.25 GB | `models/vae/` |
+| `moss_image_edit_lora_rank_64_bf16.safetensors` | 0.30 GB | `models/loras/` |
+| `moss_image_sft_dmd8_lora.safetensors` (optional, 8-step) | 1.19 GB | `models/loras/` |
+| `moss_image_color_depth_control.safetensors` (optional) | 0.31 GB | `models/loras/` |
 
 ```bash
-python scripts/dev_server.py --data-root .runtime/dev --port 7861
+python main.py --port 8189 --listen 127.0.0.1 --disable-auto-launch
 ```
 
-Notebook 從 GitHub 取程式（第 1 格預設 `main`），本機修改要推送後 Colab 才會用到。
-GPU 批次腳本與驗收流程見 [todo.md](todo.md)；交接狀態見 [DEVNOTE.md](DEVNOTE.md)。
+### 3. Toolkit
 
-## 文件
+```bash
+cd local-4090 && pip install -e ".[dev]" && pytest
+python examples/01_poster_layout.py --out out
+python examples/02_inpaint.py out/poster_42.png --box 0.30,0.55,0.70,0.92 \
+  --prompt "speaker stacks silhouette with cyan halo" --out out
+```
 
-- [使用說明](docs/user-guide.md)：啟動、五個分頁、耗時、專案、結束、疑難排解、隱私
-- [規格 v1.3.0](specs/requirements.md)：需求、架構與 AC-01～20 驗收條件
-- 階段紀錄：[Stage 0](docs/stages/stage0.md)、[Stage 1](docs/stages/stage1.md)、[Stage 2](docs/stages/stage2.md)、
-  [Stage 3～8](docs/stages/stage3-8.md)、[Stage 9](docs/stages/stage9.md)、[Stage 10](docs/stages/stage10.md)
-- [相容性](docs/compatibility.md)：實測環境、參數來源與 GPU 驗收後的調整
+The inpaint example prints how many pixels changed outside the feather support. It must be `0`.
 
-## 授權
+### Layout prompt, by hand
 
-本倉庫的程式碼與文件以 [Apache License 2.0](LICENSE) 授權。
-模型權重不在本倉庫內，各自依提供者的授權（見[模型來源](#模型來源)）；
-ComfyUI 等執行時才下載的第三方軟體，也依它們各自的授權。
+```python
+from mosskit import layout
+prompt = layout.dumps(layout.compile_layout(
+    "Minimal black poster, Swiss typography, cyan hairline grid",
+    [{"label": "text", "text": "NOCTURNO", "bbox": (0.08, 0.10, 0.92, 0.30)},
+     {"label": "text", "text": "Sábado 22 · 21 h", "bbox": (0.08, 0.34, 0.92, 0.42)},
+     {"label": "object", "caption": "speaker stacks in silhouette",
+      "bbox": (0.30, 0.55, 0.70, 0.92)}],
+    1024, 1024))
+```
+
+`bbox` is normalised `(x0, y0, x1, y1)`; the compiler converts to pixels relative to the canvas centre.
+
+---
+
+## Pitfalls found the hard way
+
+- **ComfyUI < 0.44 has no `nodes_moss_image.py`.** Don't upgrade your main install in place if it has
+  custom nodes — use a separate checkout, as above.
+- **`TextEncodeMOSSImageEdit` autogrow inputs are 0-indexed in the API:** it is `images.image_0`,
+  not `image_1`. Sending `image_1` fails with `required_input_missing` and a misleading name.
+- **Windows batch + SQLite URL:** `--database-url sqlite:///C:\path\comfy.db` (backslashes) hangs
+  startup silently after "Setting input directory". Use `sqlite:///C:/path/comfy.db`.
+- **4090 VRAM headroom is thin.** 19.2 GB of 24.5 GB means the instance must be closed before running
+  another ComfyUI or a game, or you get an OOM instead of a slow run.
+- **The edit LoRA is not surgical.** An instruction like "change only the headline text" produced the
+  exact new text but reinvented the composition. For a targeted change, regenerate with a layout
+  prompt rather than editing.
+- **`fast8` is for composition exploration only** — typography comes out unreadable.
+- **Layout control via outlines fails on studio/indoor backgrounds** (upstream finding, not re-tested
+  here): the estimated silhouette is all white, so depth is the usable control channel.
+
+## Credits and license
+
+- MOSS-Image model and weights: [OpenMOSS](https://github.com/OpenMOSS/MOSS-Image), Apache-2.0.
+- Colab studio, layout/mask semantics, sampling profiles: [Openclaw-Metis/MOSS-Image-Colab](https://github.com/Openclaw-Metis/MOSS-Image-Colab), Apache-2.0.
+- This fork: same license, see `LICENSE` and `NOTICE`.

@@ -1,0 +1,25 @@
+MOSS-Image local toolkit for a single GPU
+Copyright 2026 Tolch.x
+
+This repository is a fork of Openclaw-Metis/MOSS-Image-Colab
+(https://github.com/Openclaw-Metis/MOSS-Image-Colab), licensed under the
+Apache License, Version 2.0.
+
+The directory `local-4090/` derives from that project:
+
+  local-4090/mosskit/layout.py    <- src/moss_studio/domain/layout.py
+  local-4090/mosskit/masks.py     <- src/moss_studio/domain/masks.py
+  local-4090/mosskit/profiles.py  <- configs/profiles/*.json
+  local-4090/mosskit/graph.py     <- workflows/*.json
+
+Changes from the original: the layout compiler forces `caption == text` on text
+boxes (the original leaves them independent, which leaks caption text into the
+render), the feather/compositing code is reduced to the pieces used locally, and
+the API graphs are emitted complete instead of being patched at runtime.
+
+MOSS-Image model and weights are Copyright OpenMOSS and licensed under the
+Apache License, Version 2.0 (https://github.com/OpenMOSS/MOSS-Image).
+
+Unless required by applicable law or agreed to in writing, all material in this
+repository is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS
+OF ANY KIND, either express or implied.
